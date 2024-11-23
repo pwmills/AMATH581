@@ -1,0 +1,372 @@
+import numpy as np
+from scipy.sparse import spdiags
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from scipy.linalg import lu, solve, solve_triangular
+from scipy.sparse.linalg import gmres, bicgstab
+from scipy.fftpack import fft2, ifft2
+import time
+import random
+import pandas as pd
+import imageio
+from plotnine import *   # plotting
+from google.colab import files   # file download
+
+options = range(0, 1)    # Choose which solving method(s) to use: 0=fft2, 1=solve, 2=LU, 3=BICGSTAB, 4=GMRES
+# Note: gif only created from using fft2 as our solving method
+
+n = 128
+L = 20
+h = L / n
+x2 = np.linspace(-L/2, L/2, n+1)
+x = x2[:n]
+y = x
+X, Y = np.meshgrid(x, y, indexing='xy')
+N = n * n
+v = .001
+tspan = np.arange(0, 30.25, 0.25)
+height = 10 * len(tspan) / 9
+rows = (len(tspan) // 3) + 1
+
+main_diag = -4 * np.ones(N)
+ones_diag = np.ones(N)
+
+mostly_ones_upper_diag = np.ones(N)
+mostly_ones_lower_diag = np.ones(N)
+for i in range(n-1):
+  mostly_ones_upper_diag[(i + 1) * n] = 0
+  mostly_ones_lower_diag[(i + 1) * n - 1] = 0
+
+mostly_zeros_upper_diag = np.zeros(N)
+mostly_zeros_lower_diag = np.zeros(N)
+for i in range(n):
+  mostly_zeros_upper_diag[i * n - 1] = 1
+  mostly_zeros_lower_diag[i * n] = 1
+
+A_diagonals = [
+    main_diag,                    # 0
+    mostly_ones_upper_diag,       # 1
+    mostly_ones_lower_diag,       # -1
+    ones_diag,                    # n
+    ones_diag,                     # -n
+    mostly_zeros_upper_diag,      # n-1
+    mostly_zeros_lower_diag,      # 1-n
+    ones_diag,                    # N-n
+    ones_diag                     # n-N
+]
+
+A_offsets = [0, 1, -1, n, -n, n-1, 1-n, N-n, n-N]
+
+mat_A = spdiags(A_diagonals, A_offsets, N, N, format="lil") / h**2
+
+B_diagonals = [
+    ones_diag,      # n
+    -ones_diag,     # -n
+    -ones_diag,     # N-n
+    ones_diag       # n-N
+]
+
+B_offsets = [n, -n, N-n, n-N]
+
+mat_B = spdiags(B_diagonals, B_offsets, N, N, format="lil") / (2 * h)
+
+C_diagonals = [
+    mostly_ones_upper_diag,     # 1
+    -mostly_ones_lower_diag,     # -1
+    -mostly_zeros_upper_diag,    # n-1
+    mostly_zeros_lower_diag     # 1-n
+]
+
+C_offsets = [1, -1, n-1, 1-n]
+
+mat_C = spdiags(C_diagonals, C_offsets, N, N, format="lil") / (2 * h)
+
+#omega_0 = 1 * np.exp(-(X**2) - ((Y**2) / 20))           # Original Gaussian
+
+# ---- Random Gaussian Generator ----
+num = random.randrange(1, 16, 1)
+amp = []
+xshift = []
+yshift = []
+width = []
+gaus = np.zeros((n, n))
+for _ in range(num):
+  amp.append(random.choice([i for i in range(-8, 8) if i != 0]))
+  xshift.append(random.randint(-8, 8))
+  yshift.append(random.randint(-8, 8))
+  width.append(random.randrange(4, 44, 4))
+  gaus = gaus + (amp[_] * np.exp(-(X - xshift[_])**2 - (Y - yshift[_])**2 / width[_]))
+  
+omega_0 = gaus
+print(f"{num} gaussian elements\nAmps: {amp}\nX shifts: {xshift}\nY shifts: {yshift}\nWidth: {width}")
+gnum = num
+if len(amp) > 1:
+    amps = ', '.join(map(str, amp[:-1])) + ' & ' + str(amp[-1])
+else:
+    amps = str(amp[0])  # If there's only one number
+
+
+# ---- Manually setting 1 or 2 Gaussians ----
+# amp1 = 3
+# xshift1 = -8
+# yshift1 = -6
+# width1 = 20
+# amp2 = 4
+# xshift2 = 8
+# yshift2 = 6
+# width2 = 20
+# omega_0 = amp1 * np.exp(-(X - xshift1)**2 - (Y - yshift1)**2 / width1) + amp2 * np.exp(-(X - xshift2)**2 - (Y - yshift2)**2 / width2)
+# print(omega_0.shape)
+# if amp2 == 0:
+#   gnum = 1
+#   amps = amp1
+# else:
+#   gnum = 2
+#   amps = str(amp1) + " & " + str(amp2)
+
+
+kx = (2 * np.pi / L) * np.concatenate((np.arange(0, n/2), np.arange(-n/2, 0)))
+ky = (2 * np.pi / L) * np.concatenate((np.arange(0, n/2), np.arange(-n/2, 0)))
+kx[0] = 1e-6
+ky[0] = 1e-6
+Kx, Ky = np.meshgrid(kx, ky, indexing='xy')
+k = Kx**2 + Ky**2
+
+for RUN in options:
+
+  '''--------Part a - Solve the streamfunction using fft2--------'''
+  if RUN == 0:
+    start_time = time.time()
+    print("Solving streamfunction using fft2")
+    def fftrhs(t, omega):
+      omega2 = omega.reshape(n, n)
+      omegat = fft2(omega2)
+      psit = -omegat / k
+      psi = np.real(ifft2(psit)).reshape(N)
+      d_omega_dt = v * (mat_A @ omega) - (mat_B @ psi) * (mat_C @ omega) + (mat_B @ omega) * (mat_C @ psi)
+      return d_omega_dt
+
+    solution = solve_ivp(
+        fftrhs,
+        [tspan[0], tspan[-1]],
+        omega_0.reshape(N),
+        t_eval=tspan,
+        method='RK45'
+    )
+
+    wsol = solution.y
+    print(wsol.shape)
+    print(f"First term: {wsol[0, 0]}\nLast term: {wsol[-1, -1]}")
+
+    A1 = wsol
+    # ---- Display plots at each time interval ----
+    # fig = plt.figure(figsize=(12, height))
+    # for j, t in enumerate(tspan):
+    #     w = np.real(wsol[:N, j].reshape((n, n)))
+    #     plt.subplot(rows, 3, j + 1)
+    #     plt.pcolor(x, y, w, cmap='viridis', shading='auto')
+    #     plt.title(f'Time: {t}')
+    #     plt.colorbar()
+    # plt.tight_layout()
+    # plt.show()
+
+    # ---- Create a GIF ----
+    frames = []  # List to store image frames
+    global_min = np.min(np.real(wsol[:N, :]))
+    global_max = np.max(np.real(wsol[:N, :]))
+    for j, t in enumerate(tspan):
+      w = np.real(wsol[:N, j].reshape((n, n)))
+
+      # Create a plot
+      fig, ax = plt.subplots(figsize=(6, 6))
+      c = ax.pcolor(x, y, w, cmap='RdGy', shading='auto', vmin=global_min, vmax=global_max)
+      ax.set_xlabel('x', fontsize=12)  # X-axis label
+      ax.set_ylabel('y', fontsize=12)  # Y-axis label
+      ax.set_title(f'{gnum} Gaussian(s)\nAmplitude(s) of {amps}\nTime: {t:.2f}', fontsize=14)
+      cbar = fig.colorbar(c, ax=ax)
+      cbar.set_label('Vorticity', fontsize=12)
+      
+      # Save the current frame to a temporary file in memory
+      fig.canvas.draw()  # Render the plot
+      image = np.frombuffer(fig.canvas.buffer_rgba(), dtype='uint8')  # Use buffer_rgba
+      image = image.reshape(fig.canvas.get_width_height()[::-1] + (4,))  # RGBA has 4 channels
+      frames.append(image[:, :, :3])  # Use only RGB channels for the GIF
+      plt.close(fig)  # Close the figure to save memory
+
+    # Save all frames as a GIF
+    imageio.mimsave('solution.gif', frames, fps=15)  # Adjust fps for speed
+
+    print("GIF created: solution.gif")
+    files.download('solution.gif')
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Elapsed time: {elapsed_time: .2f} seconds")
+
+
+  '''--------Part b1 - Solve streamfunction using scypi solve--------'''
+  if RUN == 1:
+    start_time = time.time()
+    print("Solving streamfunction using solve")
+    mat_A[0, 0] = 2 / h**2
+
+    def solverhs(t, omega):
+      psi = solve(mat_A.todense(), omega)
+      d_omega_dt = v * (mat_A @ omega) - (mat_B @ psi) * (mat_C @ omega) + (mat_B @ omega) * (mat_C @ psi)
+      return d_omega_dt.flatten()
+
+    solution = solve_ivp(
+        solverhs, 
+        [tspan[0], tspan[-1]], 
+        omega_0.reshape(N), 
+        t_eval=tspan, 
+        method='RK45'
+    )
+
+    wsol2 = solution.y
+    print(wsol2.shape)
+    print(f"First term: {wsol2[0, 0]}\nLast term: {wsol2[-1, -1]}")
+
+    A2 = wsol2
+
+    fig = plt.figure(figsize=(12, 12))
+    for j, t in enumerate(tspan):
+        w = np.real(wsol2[:N, j].reshape((n, n)))
+        plt.subplot(3, 3, j + 1)
+        plt.pcolor(x, y, w, cmap='viridis', shading='auto')
+        plt.title(f'Time: {t}')
+        plt.colorbar()
+    plt.tight_layout()
+    plt.show()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Elapsed time: {elapsed_time: .2f} seconds")
+
+
+  '''--------Part b2 - Solve the streamfunction using LU--------'''
+  if RUN == 2:
+    start_time = time.time()
+    print("Solving streamfunction using LU")
+    mat_A[0, 0] = 2 / h**2    # Same as part B
+    P, AL, AU = lu(mat_A.todense())   #Find lower and upper matrices
+
+    def vorticity_rhs(t, omega):
+      Pb = np.dot(P, omega)
+      lowersol = solve_triangular(AL, Pb, lower=True)
+      psi = solve_triangular(AU, lowersol)
+      d_omega_dt = v * (mat_A @ omega) - (mat_B @ psi) * (mat_C @ omega) + (mat_B @ omega) * (mat_C @ psi)
+      return d_omega_dt
+
+    solution = solve_ivp(
+        vorticity_rhs,
+        [tspan[0], tspan[-1]],
+        omega_0.reshape(N),
+        t_eval=tspan,
+        method='RK45'
+    )
+
+    wsol3 = solution.y
+    print(wsol3.shape)
+    print(f"First term: {wsol3[0, 0]}\nLast term: {wsol3[-1, -1]}")
+
+    A3 = wsol3
+
+    fig = plt.figure(figsize=(12, 12))
+    for j, t in enumerate(tspan):
+        w = np.real(wsol3[:N, j].reshape((n, n)))
+        plt.subplot(3, 3, j + 1)
+        plt.pcolor(x, y, w, cmap='viridis', shading='auto')
+        plt.title(f'Time: {t}')
+        plt.colorbar()
+
+    plt.tight_layout()
+    plt.show()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Elapsed time: {elapsed_time: .2f} seconds")
+
+
+  '''--------Part b3 - Solve streamfunction using BICGSTAB--------'''
+  if RUN == 3:
+    start_time = time.time()
+    print("Solving streamfunction using BICGSTAB")
+    mat_A[0, 0] = 2 / h**2
+
+    def solverhs(t, omega):
+      psi, dummy = bicgstab(mat_A, omega, rtol=1e-4)
+      if dummy != 0:
+        print(f"BICGSTAB failed to converge. Info: {dummy}")
+      d_omega_dt = v * (mat_A @ omega) - (mat_B @ psi) * (mat_C @ omega) + (mat_B @ omega) * (mat_C @ psi)
+      return d_omega_dt.flatten()
+
+    solution = solve_ivp(
+        solverhs, 
+        [tspan[0], tspan[-1]], 
+        omega_0.reshape(N), 
+        t_eval=tspan, 
+        method='RK45'
+    )
+
+    wsol4 = solution.y
+
+    print(wsol4.shape)
+    print(f"First term: {wsol4[0, 0]}\nLast term: {wsol4[-1, -1]}")
+
+    # Plotting wsol2 i.e. solutions using solve for streamfunction
+    fig = plt.figure(figsize=(12, 12))
+    for j, t in enumerate(tspan):
+        w = np.real(wsol4[:N, j].reshape((n, n)))
+        plt.subplot(3, 3, j + 1)
+        plt.pcolor(x, y, w, cmap='viridis', shading='auto')
+        plt.title(f'Time: {t}')
+        plt.colorbar()
+    plt.tight_layout()
+    plt.show()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Elapsed time: {elapsed_time: .2f} seconds")
+
+
+
+  '''--------Part b4 - Solve streamfunction using GMRES--------'''
+  if RUN == 4:
+    start_time = time.time()
+    print("Solving streamfunction using GMRES")
+    mat_A[0, 0] = 2 / h**2
+
+    def solverhs(t, omega):
+      #psi, dummy = gmres(mat_A, omega, maxiter=20, rtol=1e-3)
+      psi, dummy = gmres(mat_A, omega)
+      # if dummy != 0:
+      #   print(f"GMRES failed to converge. Info: {dummy}")
+      d_omega_dt = v * (mat_A @ omega) - (mat_B @ psi) * (mat_C @ omega) + (mat_B @ omega) * (mat_C @ psi)
+      return d_omega_dt.flatten()
+
+    solution = solve_ivp(
+        solverhs, 
+        [tspan[0], tspan[-1]], 
+        omega_0.reshape(N), 
+        t_eval=tspan, 
+        method='RK45'
+    )
+
+    wsol5 = solution.y
+
+    print(wsol5.shape)
+    print(f"First term: {wsol5[0, 0]}\nLast term: {wsol5[-1, -1]}")
+
+    # Plotting wsol2 i.e. solutions using solve for streamfunction
+    fig = plt.figure(figsize=(12, 12))
+    for j, t in enumerate(tspan):
+        w = np.real(wsol5[:N, j].reshape((n, n)))
+        plt.subplot(3, 3, j + 1)
+        plt.pcolor(x, y, w, cmap='viridis', shading='auto')
+        plt.title(f'Time: {t}')
+        plt.colorbar()
+    plt.tight_layout()
+    plt.show()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Elapsed time: {elapsed_time: .2f} seconds")
+
+# print(f"A1 last term: {A1[-1, -1]}\nA2 last term: {A2[-1, -1]}\nA3 last term: {A3[-1, -1]}")
