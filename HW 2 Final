@@ -1,0 +1,72 @@
+import numpy as np
+from scipy.integrate import odeint
+import matplotlib.pyplot as plt
+import math
+
+
+def oursystem(x, y, epsilon):
+    return [y[1], (K * x**2 - epsilon) * y[0]]
+
+tol = 1e-6 # define a tolerance level
+col = ['r', 'b', 'g', 'c', 'm', 'k'] # eigenfunc colors
+n0 = 1.5
+L = 4
+K = 1
+xspan =  np.arange(-L, L + 0.1, 0.1)
+
+def boundary_conditions(zl, zr, epsilon):
+    left_bc = zl[1] - np.sqrt(max(L**2 - epsilon, 0)) * zl[0]  # BC at x = -L
+    right_bc = zr[1] + np.sqrt(max(L**2 - epsilon, 0)) * zr[0]  # BC at x = L
+    return [left_bc, right_bc]
+
+A1 = np.zeros((len(xspan), 5))
+A2 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+
+epsilon_start = n0  # beginning value of beta
+
+for modes in range(1, 6):  # begin mode loop
+    epsilon = epsilon_start
+
+    depsilon = 4  # default step size in beta
+
+    times_above = 0
+
+    for _ in range(1000):  # begin convergence loop for beta
+
+        x0 = [1, np.sqrt(L**2 - epsilon)]
+
+        z = odeint(oursystem, x0, xspan, args=(epsilon,), tfirst=True)
+
+        zl = z[0]  # Value at x = -L
+        zr = z[-1]  # Value at x = L
+
+        bc = boundary_conditions(zl, zr, epsilon)
+
+        if abs(bc[1]) < tol:  # If the boundary condition is satisfied at x = L
+            break  # Convergence achieved
+
+        if ((-1) ** (modes + 1)) * bc[1] < 0:
+            epsilon -= depsilon / 2
+            times_above = times_above + 1
+
+        else:
+            epsilon += depsilon / 2
+            depsilon /= 2
+
+    print("Eigenvalue for mode ", modes, ": ", epsilon, " # of loops: ", _)
+
+    norm = np.trapz(z[:, 0] * z[:, 0], xspan)  # calculate the normalization
+    normalized_eigenfunction = z[:, 0] / np.sqrt(norm)
+
+    # Store the normalized eigenfunction in the corresponding column of A1
+    A1[:, modes - 1] = np.abs(normalized_eigenfunction)
+
+    A2[modes - 1] = epsilon
+
+    epsilon_start = epsilon + 1 # after finding eigenvalue, pick new start
+    plt.plot(xspan, z[:, 0] / np.sqrt(norm), col[modes - 1])  # plot modes
+
+plt.show()  # end mode loop
+print(A2)
+print(A1[0, :])
+print(A1[-1, :])
